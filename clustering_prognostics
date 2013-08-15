@@ -1,0 +1,202 @@
+%                                The Problem
+% Subtypes usually exist within a more generic/larger disease phenotype, and
+% subtypes display different prognostic prospects. It would be of high
+% clinical relevance if we could identify subtypes which display prognostic
+% favorable behavior, so clinicians could administer personalized treatment
+% to this subgroup.
+%                    The solution offered by this algorithm
+% transcriptomic patient data and cluster the patients based on their gene
+% ranks in each pre-defined networks (A network is a collection of
+% interacting genes). Two clusters separated by a certain network will be
+% evaluated to see if there is a survival difference by integrating with
+% The algorithm will screen automatically all the networks in the database
+% and rank top network candidates according to p-values obtained from
+% log-rank test
+
+%                     By Chunjing Wang Written in 2011-2012
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                         Inputs and Outputs
+% Input .mat file 1: survival_info: a matrix of two columns
+% column 1: patient survival length in days(can also be in months/years,
+% but they have to be consistent for all patients)
+% column 2: censoring status, 1 means the data is censored, which implies
+% we do not have information beyond last point of data collection; the
+% patient lives beyond that point and we have to estimate his survival
+% length; 0 means the data is not censored. The patient died.
+
+% Input .mat file 2: data_info: this data structure is preprocessed by many
+% complicated steps to remove batch effects, to map affymetrix array probe
+% sets to gene names in network data base etc. Now the structure has
+% gs  =  gene set (network) name, e.g. MRP pathway
+% G_gs_total  =  total number of unique genes formed by all networks in the
+% database
+% g: unique gene names corresponding to the rows of expression data
+% G_gs_matched  =  total number of unique genes mapped into the network
+% database (intersection of g and G_gs_total)
+% g_gs : genes in each network are arranged in alphabetical order; networks
+% are listed in the order of gs; 
+% g_gs_idx: indices of genes in list of genes (g)
+% X: gene expression data with rows representing genes and columns
+% representing patients
+
+load survival_info
+load expression_data
+
+N  =  size(survival_info,1);
+g_gs_idx  =  expression_data.g_gs_idx;
+X  =  expression_data.X;
+
+%% initialize result matrix
+pvaluematrix  =  zeros(size(g_gs_idx,1),3);
+
+%% for each network in the database, we need a distance matrix which contains how
+%% similar or dissimilar each patient to all other.
+for runcount  =  1:size(g_gs_idx,1) 
+    m  =  runcount;
+    distance  =  zeros(N); 
+    g_m  =  g_gs_idx(m,g_gs_idx(m,:)>0); %% get gene indices of this network
+    G_m  =  numel(g_m); %% size of the current network
+    T_0  =  nchoosek(1:G_m,2); % pairwise combinations formed by all genes in the network
+    %% e.g. if the network has 4 genes, we will have (4 choose 2)  =  6 combinations
+    
+    %% get all patients' expression values of genes in this network
+    X_m  =  X(g_m,:);
+    X_m  =  X_m'; 
+    for i = 1:N
+        for j = 1:N
+            if i<j
+                s1_index = i;
+                s2_index = j; 
+                S_1 = X_m(s1_index,T_0(:,1))< X_m(s1_index,T_0(:,2)); %% if gene i < gene j for this patient, S_1 = 1, else S_1 = 0
+                S_2 = X_m(s2_index,T_0(:,1))< X_m(s2_index,T_0(:,2)); % binary comparison for another patient
+                for k = 1:size(T_0,1) % for all 6 comparisons
+                    if (~S_1(k) == S_2(k))
+                        distance(i,j) = distance(i,j)+1; % find out how many out of 6 they are NOT the same; that's the "distance"
+                    end
+                end
+            end
+            if i>j
+                distance(i,j) = distance(j,i); %% the distance entries are symmetrical, so we only need to compute half of the matrix
+            end
+        end
+    end
+    distance = squareform(distance);
+    %% we could choose different metric here, we chose "weighted" since it offers relatively stable output
+    link = linkage(distance,'weighted');
+   
+    [H,T,perm,Acoordsraw,Bcoordsraw] = dendrogram_mod(link);
+    
+    % for top branch division of dendrogram
+    Acoords = sort(Acoordsraw);
+    nontopbranches = sort(Acoords(:,1:end-1),2);
+    topbranchdivisionfound = 0;
+    topbranchdivisionindex = 0;
+    if min(min(nontopbranches))~= min(min(Acoords))
+        branch2start = min(min(nontopbranches));
+        branch1end = min(min(Acoords));
+    elseif max(max(nontopbranches))~= max(max(Acoords))
+        branch2start = max(max(Acoords));
+        branch1end = max(max(nontopbranches));
+    else
+        while topbranchdivisionfound == 0
+            topbranchdivisionindex = topbranchdivisionindex+1;
+            if nontopbranches(3,topbranchdivisionindex)<nontopbranches(2,topbranchdivisionindex+1)
+                branch1end = nontopbranches(3,topbranchdivisionindex);
+                topbranchdivisionfound = 1;
+            end
+            if topbranchdivisionindex == size(nontopbranches,2)-1
+                break
+            end
+        end
+        branch2start = branch1end+1;
+    end
+    %% c1 contains coordinates in the first cluster, c2 contains coordinates in the 2nd cluster
+    c1 = perm(min(min(Acoords)):branch1end); 
+    c2 = perm(branch2start:max(max(Acoords))); 
+    
+    %% get all patients in the first cluster, get all patients in the second cluster
+    c1_samp = [];
+    for i = 1:size(c1,2)
+        c1_samp = [c1_samp;find(T == c1(i))]; 
+    end
+    
+    c2_samp = [];
+    for i = 1:size(c2,2)
+        c2_samp = [c2_samp;find(T == c2(i))];
+    end
+    
+    %% get survival information of all patients in group 1, get survival information of all patients in group 2
+    x1 = survival_info(c1_samp,:); 
+    x2 = survival_info(c2_samp,:); 
+    %figure
+    
+    % use a log-rank test to test for statistical significance
+    pvalue1 = logrank(x1,x2); 
+    
+    % for secondmost top branch division of dendrogram
+    % if the first group c1 has more patients than 2nd group c2, further find two largest groups within c1
+    % else furhter find two largest groups within c2
+    if size(c1_samp,1)>size(c2_samp,1) 
+        secondbranchindex = find(Acoords(3,:)<branch2start); 
+    else
+        secondbranchindex = find(Acoords(2,:)>branch1end); 
+    end
+    
+    secondAcoords = Acoords(:,secondbranchindex);
+    secondnontopbranches = sort(secondAcoords(:,1:end-1),2);
+    secondtopbranchdivisionfound = 0;
+    secondtopbranchdivisionindex = 0;
+    if min(min(secondnontopbranches))~= min(min(secondAcoords))
+        secondbranch2start = min(min(secondnontopbranches));
+        secondbranch1end = min(min(secondAcoords));
+    elseif max(max(secondnontopbranches))~= max(max(secondAcoords))
+        secondbranch2start = max(max(secondAcoords));
+        secondbranch1end = max(max(secondnontopbranches));
+    else
+        while secondtopbranchdivisionfound == 0
+            secondtopbranchdivisionindex = secondtopbranchdivisionindex+1;
+            if secondnontopbranches(3,secondtopbranchdivisionindex)<secondnontopbranches(2,secondtopbranchdivisionindex+1)
+                secondbranch1end = secondnontopbranches(3,secondtopbranchdivisionindex);
+                secondtopbranchdivisionfound = 1;
+            end
+            if secondtopbranchdivisionindex == size(secondnontopbranches,2)-1
+                break
+            end
+        end
+        secondbranch2start = secondbranch1end+1;
+    end
+    
+    %% get sample cordinates in the next level of branches,e.g. in c1 if c1.size()> c2.size()
+    c3 = perm(min(min(secondAcoords)):secondbranch1end); 
+    c4 = perm(secondbranch2start:max(max(secondAcoords))); 
+    
+    %% get patients in the next level of branches, e.g. in c1
+    c3_samp = [];
+    for i = 1:size(c3,2)
+        c3_samp = [c3_samp;find(T == c3(i))];
+    end
+    
+    c4_samp = [];
+    for i = 1:size(c4,2)
+        c4_samp = [c4_samp;find(T == c4(i))];
+    end 
+    
+    x3 = survival_info(c3_samp,:);
+    x4 = survival_info(c4_samp,:);
+    %figure
+    %% computer p-value between these two subgroups within c1 group
+    pvalue2 = logrank(x3,x4);
+    
+    %% write two values and the branch which are not further investigated for branching.e.g. c1 is larger than c2
+    %% so c1 is further broken into two groups and c2 is not, so we need to record down the size of c2
+    %% in the case of the groups within c1 gives statistical difference, we need to make sure c2 size is small enough
+    %% to be taken as outliers.
+    pvaluematrix(runcount,:) = [pvalue1 pvalue2 size(c1_samp,1)+size(c2_samp,1)-size(c3_samp,1)-size(c4_samp,1)];
+    fprintf('Pathway %d done: %.2f%% completed.\n',runcount,100*runcount/size(g_gs_idx,1))
+    
+end
+
+% column 1: all patients
+% column 2: with outliers
+% column 3: number of patients in outlier group
+xlswrite('Matrix of P values_239.xls',pvaluematrix) % to export p values to an excel sheet
